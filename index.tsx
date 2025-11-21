@@ -424,16 +424,23 @@ const Scanner = ({ onCancel, onAnalyzed }: { onCancel: () => void, onAnalyzed: (
     setIsAnalyzing(true);
     setError(null);
 
-    try {
-      // 1. Convert Image to Base64
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = async () => {
+    // 1. Check API Key with robust check
+    const apiKey = process.env.API_KEY;
+    if (!apiKey || apiKey === "undefined" || apiKey === "") {
+        setError("API Key is missing! Go to Vercel Dashboard -> Project Settings -> Environment Variables and set 'API_KEY'.");
+        setIsAnalyzing(false);
+        return;
+    }
+
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+
+    reader.onload = async () => {
+      try {
         const base64String = reader.result as string;
         const base64Data = base64String.split(',')[1];
 
-        // 2. Call Gemini Vision
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const ai = new GoogleGenAI({ apiKey: apiKey });
         
         const prompt = `
         Analyze this wine label image. Return a JSON object with these keys:
@@ -446,7 +453,8 @@ const Scanner = ({ onCancel, onAnalyzed }: { onCancel: () => void, onAnalyzed: (
         If uncertain, use null.
         `;
 
-        const result = await ai.models.generateContent({
+        // Add timeout wrapper to prevent infinite spinning
+        const apiCall = ai.models.generateContent({
           model: "gemini-2.5-flash",
           contents: {
             parts: [
@@ -470,7 +478,19 @@ const Scanner = ({ onCancel, onAnalyzed }: { onCancel: () => void, onAnalyzed: (
           }
         });
 
-        const data = JSON.parse(result.text || "{}");
+        // 15 second timeout
+        const timeout = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("Request timed out. Please check your internet connection.")), 15000)
+        );
+
+        const result: any = await Promise.race([apiCall, timeout]);
+
+        // 3. Defensively parse JSON (strip markdown if present)
+        let text = result.text || "{}";
+        if (text.startsWith('```')) {
+             text = text.replace(/^```json\s*/, '').replace(/```$/, '');
+        }
+        const data = JSON.parse(text);
 
         const newWine: Wine = {
           id: Date.now().toString(),
@@ -490,12 +510,23 @@ const Scanner = ({ onCancel, onAnalyzed }: { onCancel: () => void, onAnalyzed: (
         };
 
         onAnalyzed(newWine);
-      };
-    } catch (err) {
-      console.error(err);
-      setError('Could not analyze image. Please try again.');
-      setIsAnalyzing(false);
-    }
+      } catch (err: any) {
+        console.error("Analysis Error:", err);
+        let msg = 'Could not analyze image.';
+        if (err.message?.includes('timed out')) msg = "Request timed out. Check internet.";
+        if (err.message?.includes('403') || err.toString().includes('403')) msg += ' (API Key Invalid or Quota Exceeded)';
+        if (err.message?.includes('429') || err.toString().includes('429')) msg += ' (Quota Exceeded)';
+        if (err.message?.includes('400') || err.toString().includes('400')) msg += ' (Bad Request - Image too large?)';
+        setError(msg);
+      } finally {
+        setIsAnalyzing(false);
+      }
+    };
+
+    reader.onerror = () => {
+        setError("Failed to read file.");
+        setIsAnalyzing(false);
+    };
   };
 
   return (
@@ -531,7 +562,10 @@ const Scanner = ({ onCancel, onAnalyzed }: { onCancel: () => void, onAnalyzed: (
               onChange={handleFileUpload} 
               className="hidden" 
             />
-            {error && <p className="text-red-400 bg-red-900/30 p-3 rounded-lg text-sm">{error}</p>}
+            {error && <div className="text-red-200 bg-red-900/50 p-4 rounded-xl text-sm border border-red-500/50">
+              <p className="font-bold mb-1">Error</p>
+              <p>{error}</p>
+            </div>}
           </div>
         )}
       </div>
@@ -552,9 +586,12 @@ const Editor = ({ wine, onSave, onCancel, onDelete }: { wine: Wine, onSave: (w: 
   }, []);
 
   const enrichWineData = async () => {
+    const apiKey = process.env.API_KEY;
+    if (!apiKey || apiKey === "undefined" || apiKey === "") return; // Skip if no key
+    
     setIsEnriching(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey: apiKey });
 
       const query = `Find tasting notes, flavor profile, and vintage comparison for ${formData.vintage} ${formData.winery} ${formData.name} wine.`;
       
