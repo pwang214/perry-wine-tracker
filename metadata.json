@@ -1,0 +1,7 @@
+{
+  "description": "AI Sommelier Wine Tracker with Vision and Search Grounding.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "name": "App"
+}
